@@ -4,7 +4,10 @@ Build the interactive county map from the pipeline's forecast summary.
 Reads:
   forecast_summary CSV  (county_fips, period, prob_below_P20, calibrated_median,
                          calibrated_p10, calibrated_p90, ERA5L_P20_threshold)
-  LOYO metrics CSV      (optional; county_fips, period, season, cal_MSESS)
+  LOYO metrics CSV      (optional; county_fips, period, season, cal_MSESS, cal_ACC)
+                        -- the seasonally pooled test from the Section 17 library
+  single-date metrics   (optional; county_fips, period, calibrated_correlation)
+                        -- the single-date test for this forecast's start date
 Writes:
   one self-contained HTML file (map_template.html with the numbers filled in)
 """
@@ -51,23 +54,31 @@ def _date_range(init, first_day, last_day, day_offset):
 
 def build_map(summary_csv, out_html, target, model_date,
               metrics_csv=None, periods=None, era5_day_offset=-1,
-              template=TEMPLATE):
+              template=TEMPLATE, single_metrics_csv=None, report_url=None,
+              single_date=None):
     periods = periods or DEFAULT_PERIODS
     init = pd.Timestamp(model_date)
 
     s = pd.read_csv(summary_csv, dtype={"county_fips": str})
     s["county_fips"] = s["county_fips"].str.zfill(5)
 
-    skill = {}
+    season = SEASON_OF_MONTH[init.month]
+    skill, acc, single = {}, {}, {}
     if metrics_csv is not None and Path(metrics_csv).exists():
         m = pd.read_csv(metrics_csv, dtype={"county_fips": str})
         m["county_fips"] = m["county_fips"].str.zfill(5)
         if "season" in m.columns:
-            m = m[m["season"] == SEASON_OF_MONTH[init.month]]
-        col = "cal_MSESS" if "cal_MSESS" in m.columns else None
-        if col:
-            skill = {(r.county_fips, r.period): _num(getattr(r, col), nd=3)
-                     for r in m.itertuples()}
+            m = m[m["season"] == season]
+        if "cal_MSESS" in m.columns:
+            skill = {(r.county_fips, r.period): _num(r.cal_MSESS, nd=3) for r in m.itertuples()}
+        if "cal_ACC" in m.columns:
+            acc = {(r.county_fips, r.period): _num(r.cal_ACC, nd=3) for r in m.itertuples()}
+    if single_metrics_csv is not None and Path(single_metrics_csv).exists():
+        sd = pd.read_csv(single_metrics_csv, dtype={"county_fips": str})
+        sd["county_fips"] = sd["county_fips"].str.zfill(5)
+        single = {(r.county_fips, r.period): _num(r.calibrated_correlation, nd=3) for r in sd.itertuples()}
+        if single_date is None and "reforecast_date" in sd.columns and len(sd):
+            single_date = str(sd["reforecast_date"].iloc[0])
 
     period_names = [p for p in periods if p in set(s["period"])]
     if not period_names:
@@ -84,12 +95,18 @@ def build_map(summary_csv, out_html, target, model_date,
                 "p90": _num(getattr(r, "calibrated_p90", None)),
                 "thr": _num(getattr(r, "ERA5L_P20_threshold", None)),
                 "skill": skill.get((r.county_fips, per)),
+                "acc": acc.get((r.county_fips, per)),
+                "single": single.get((r.county_fips, per)),
             }
 
     forecast = {
         "layer": target,
         "layer_label": LAYER_LABEL.get(target, target),
         "init_date": f"{init:%b} {init.day}, {init:%Y}",
+        "season": season,
+        "single_date": (f"{pd.Timestamp(single_date):%b} {pd.Timestamp(single_date).day}, "
+                        f"{pd.Timestamp(single_date):%Y}") if single_date else None,
+        "report": report_url,
         "periods": [
             {"label": p, "dates": _date_range(init, *periods[p], era5_day_offset)}
             for p in period_names

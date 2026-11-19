@@ -345,6 +345,7 @@
       <div class="aldm-view-toggle" id="aldm-toggle">
         <button data-view="outlook" class="aldm-on">Drought outlook</button>
         <button data-view="skill">Skill vs climatology</button>
+        <button data-view="single" id="aldm-btn-single">Skill this start date</button>
       </div>
       <svg id="aldm-svg" viewBox="0 0 800 900" xmlns="http://www.w3.org/2000/svg"></svg>
       <div class="aldm-tooltip" id="aldm-tooltip"></div>
@@ -388,6 +389,15 @@
           <span class="aldm-stat-value" id="aldm-d-skill">—</span>
         </div>
         <div class="aldm-skill-note" id="aldm-d-skillnote"></div>
+        <div class="aldm-stat-row" id="aldm-row-acc">
+          <span class="aldm-stat-label">Correlation, whole season</span>
+          <span class="aldm-stat-value" id="aldm-d-acc">—</span>
+        </div>
+        <div class="aldm-stat-row" id="aldm-row-single">
+          <span class="aldm-stat-label">Correlation, this start date</span>
+          <span class="aldm-stat-value" id="aldm-d-single">—</span>
+        </div>
+        <div class="aldm-skill-note" id="aldm-d-singlenote"></div>
         <div class="aldm-stat-row">
           <span class="aldm-stat-label">Statewide rank</span>
           <span class="aldm-stat-value" id="aldm-d-rank">—</span>
@@ -398,7 +408,7 @@
     </div>
   </div>
 
-  <p class="aldm-footnote" id="aldm-footnote">County boundaries: U.S. Census TIGER. Forecast: ECMWF S2S ensemble, calibrated per county against ERA5-Land with empirical quantile mapping. The S2S model grid (1.5&deg;) is much coarser than a county, so neighbouring counties share much of the same forecast signal; county differences mostly reflect local climatology. Experimental research product, not an official drought designation.</p>
+  <p class="aldm-footnote" id="aldm-footnote">County boundaries: U.S. Census TIGER. Forecast: ECMWF S2S ensemble, calibrated per county against ERA5-Land with empirical quantile mapping. The S2S model grid (1.5&deg;) is much coarser than a county, so neighbouring counties share much of the same forecast signal; county differences mostly reflect local climatology. Experimental research product, not an official drought designation.<span id="aldm-report"></span></p>
 </div>
 
 <script>
@@ -424,6 +434,14 @@
     { max: 0.5,  code: '0.25–0.5', name: 'Good',                    color: '#5f9466', dark: true  },
     { max: 9,    code: '≥0.5',     name: 'Strong',                  color: '#2f5d47', dark: true  },
   ];
+  // Correlation of the calibrated forecast with ERA5-Land, single-date test (20 years)
+  const SINGLE_BINS = [
+    { max: 0.2, code: '< 0.2',   name: 'None',   color: '#d8d0c2', dark: false },
+    { max: 0.4, code: '0.2–0.4', name: 'Weak',   color: '#dfe8c8', dark: false },
+    { max: 0.6, code: '0.4–0.6', name: 'Fair',   color: '#a9c58d', dark: false },
+    { max: 0.8, code: '0.6–0.8', name: 'Good',   color: '#5f9466', dark: true  },
+    { max: 9,   code: '≥0.8',    name: 'Strong', color: '#2f5d47', dark: true  },
+  ];
   const NODATA = { code: 'n/a', name: 'No forecast', color: '#e4e0d8', dark: false };
 
   const root = document.currentScript.closest('.aldm-root') || document.querySelector('.aldm-root');
@@ -436,12 +454,28 @@
   let idx = 0, selectedFips = null, hoveredFips = null, playTimer = null;
 
   function binFor(p, bins) {
-    bins = bins || (view === 'skill' ? SKILL_BINS : BINS);
+    bins = bins || (view === 'skill' ? SKILL_BINS : view === 'single' ? SINGLE_BINS : BINS);
     if (p === null || p === undefined || isNaN(p)) return NODATA;
     for (let i = 0; i < bins.length; i++) if (p < bins[i].max) return bins[i];
     return bins[bins.length - 1];
   }
-  function val(fips, i) { const r = rec(fips, i); if (!r) return null; return view === 'skill' ? r.skill : r.p; }
+  function val(fips, i) {
+    const r = rec(fips, i); if (!r) return null;
+    return view === 'skill' ? r.skill : view === 'single' ? r.single : r.p;
+  }
+  function has(v) { return v !== null && v !== undefined && !isNaN(v); }
+  // hide the single-date view when this build has no single-date scores
+  const HAS_SINGLE = Object.keys(FC.counties).some(function(f) {
+    return FC.counties[f].some(function(r) { return r && has(r.single); });
+  });
+  const HAS_ACC = Object.keys(FC.counties).some(function(f) {
+    return FC.counties[f].some(function(r) { return r && has(r.acc); });
+  });
+  if (!HAS_SINGLE) { ['#aldm-btn-single', '#aldm-row-single'].forEach(function(s) { const e = $(s); if (e) e.style.display = 'none'; }); }
+  if (!HAS_ACC) { const e = $('#aldm-row-acc'); if (e) e.style.display = 'none'; }
+  if (FC.report) {
+    $('#aldm-report').innerHTML = ' <a href="' + FC.report + '" target="_blank" rel="noopener">Full validation report for this forecast</a>.';
+  }
   function rec(fips, i) { const c = FC.counties[fips]; return c ? c[i] : null; }
   function prob(fips, i) { const r = rec(fips, i); return r ? r.p : null; }
   function fmtSM(v) { return (v === null || v === undefined) ? '—' : v.toFixed(3); }
@@ -450,16 +484,22 @@
   $('#aldm-init').textContent = FC.init_date;
   function renderChrome() {
     const layer = FC.layer_label.toLowerCase();
-    $('#aldm-subtitle').textContent = view === 'skill'
+    $('#aldm-subtitle').textContent = view === 'single'
+      ? 'How closely the calibrated forecast tracked observed soil moisture for this start date (' + (FC.single_date || FC.init_date) + ') over the past 20 years, by county.'
+      : view === 'skill'
       ? 'How much the calibrated forecast beat climatology (the long-term average for that date) in past years, by county. Season: ' + FC.season + '.'
       : 'Chance that ' + layer + ' soil moisture falls into the driest 20% for this time of year, by county.';
-    $('#aldm-legend').innerHTML = (view === 'skill' ? SKILL_BINS : BINS).map(function(b) {
+    $('#aldm-legend').innerHTML = (view === 'skill' ? SKILL_BINS : view === 'single' ? SINGLE_BINS : BINS).map(function(b) {
       return '<div class="aldm-legend-seg" style="background:' + b.color + (b.dark ? ';color:#f6f1e7' : '') + '">' +
         b.code + '<span class="aldm-legend-name"' + (b.dark ? ' style="opacity:0.9"' : '') + '>' + b.name + '</span></div>';
     }).join('');
-    $('#aldm-spark-label').textContent = view === 'skill'
+    $('#aldm-spark-label').textContent = view === 'single'
+      ? 'CORRELATION: THIS START DATE (RED) VS WHOLE SEASON (GREY)'
+      : view === 'skill'
       ? 'SKILL VS CLIMATOLOGY (MSESS), BY FORECAST PERIOD' : 'CHANCE OF DRIEST 20%, BY FORECAST PERIOD';
-    $('#aldm-hint').textContent = view === 'skill'
+    $('#aldm-hint').textContent = view === 'single'
+      ? 'Single-date test: the calibrated forecast for this start date, scored against ERA5-Land in each of 20 past years (leave-one-year-out). 1 = perfect. With only 20 cases the value is uncertain by about ±0.2, so compare it with the whole-season score (about 280 cases): a big gap means skill at this time of year differs from the season average.'
+      : view === 'skill'
       ? 'MSESS = 1 − (calibrated forecast error ÷ climatology error), from leave-one-year-out testing over ' + FC.season + ' start dates. Above 0: the forecast beat simply assuming average conditions. 0 or below: it did not, so the outlook for that county and period should be treated with caution.'
       : 'In a typical year every county has a 20% chance of being in its driest 20%. Values well above 20% mean the forecast leans dry; values below 20% mean it leans wet. Switch to "Skill vs climatology" to see where the forecast has a track record.';
     root.querySelectorAll('#aldm-toggle button').forEach(function(btn) {
@@ -485,8 +525,9 @@
 
   function tooltipHTML(c) {
     const v = val(c.fips, idx);
-    if (v === null || v === undefined) return '<b>' + c.name + '</b><br>' + (view === 'skill' ? 'No skill score' : 'No forecast');
+    if (v === null || v === undefined) return '<b>' + c.name + '</b><br>' + (view === 'outlook' ? 'No forecast' : 'No skill score');
     if (view === 'skill') return '<b>' + c.name + '</b><br>Skill ' + v.toFixed(2) + ' &middot; ' + binFor(v).name;
+    if (view === 'single') return '<b>' + c.name + '</b><br>Correlation ' + v.toFixed(2) + ' (this start date) &middot; ' + binFor(v).name;
     return '<b>' + c.name + '</b><br>' + Math.round(v) + '% chance of driest 20% &middot; ' + binFor(v).name;
   }
   function showTooltip(e, c) {
@@ -505,10 +546,11 @@
     Object.keys(paths).forEach(function(f) { paths[f].classList.toggle('aldm-selected', f === selectedFips); });
   }
 
-  function sparkline(vals) {
+  function sparkline(vals, vals2) {
     const w = 240, h = 64, pad = 8, n = vals.length;
-    const sk = view === 'skill';
-    const lo = sk ? -0.5 : 0, hi = sk ? 1 : 100, ref = sk ? 0 : 20, refLabel = sk ? 'climatology = 0' : 'usual 20%';
+    const sk = view === 'skill', sg = view === 'single';
+    const lo = sk ? -0.5 : 0, hi = (sk || sg) ? 1 : 100, ref = sk ? 0 : sg ? 0.5 : 20;
+    const refLabel = sk ? 'climatology = 0' : sg ? '0.5' : 'usual 20%';
     const stepX = (w - pad * 2) / Math.max(n - 1, 1);
     const y = function(v) { v = Math.max(lo, Math.min(hi, v)); return h - pad - ((v - lo) / (hi - lo)) * (h - pad * 2); };
     const pts = vals.map(function(v, i) { return (v === null || v === undefined) ? null : [pad + i * stepX, y(v)]; });
@@ -516,6 +558,11 @@
     let s = '<line x1="' + pad + '" x2="' + (w - pad) + '" y1="' + y(ref).toFixed(1) + '" y2="' + y(ref).toFixed(1) +
       '" stroke="#7a5c40" stroke-dasharray="3 3" stroke-width="1"/>' +
       '<text x="' + (w - pad) + '" y="' + (y(ref) - 3).toFixed(1) + '" text-anchor="end" font-size="8" fill="#7a5c40" font-family="IBM Plex Mono, monospace">' + refLabel + '</text>';
+    if (vals2) {
+      const p2 = vals2.map(function(v, i) { return has(v) ? [pad + i * stepX, y(v)] : null; }).filter(Boolean);
+      if (p2.length > 1) s += '<path d="' + p2.map(function(p, i) { return (i ? 'L' : 'M') + p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join(' ') +
+        '" fill="none" stroke="#8a7a6a" stroke-width="1.6" stroke-dasharray="4 2"/>';
+    }
     if (valid.length > 1) {
       const line = valid.map(function(p, i) { return (i ? 'L' : 'M') + p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join(' ');
       s += '<path d="' + line + '" fill="none" stroke="#7a1f1f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>';
@@ -540,10 +587,11 @@
     const badge = $('#aldm-d-badge');
     badge.style.background = b.color;
     badge.style.color = b.dark ? '#f6f1e7' : '#241a12';
-    $('#aldm-d-value').textContent = (v === null || v === undefined) ? 'n/a' : (view === 'skill' ? v.toFixed(2) : Math.round(v) + '%');
+    $('#aldm-d-value').textContent = (v === null || v === undefined) ? 'n/a' : (view === 'outlook' ? Math.round(v) + '%' : v.toFixed(2));
     $('#aldm-d-sevname').textContent = b.name;
 
-    $('#aldm-d-spark').innerHTML = sparkline(periods.map(function(_, i) { return val(c.fips, i); }));
+    $('#aldm-d-spark').innerHTML = sparkline(periods.map(function(_, i) { return val(c.fips, i); }),
+      view === 'single' ? periods.map(function(_, i) { const q = rec(c.fips, i); return q ? q.acc : null; }) : null);
 
     $('#aldm-d-median').innerHTML = r ? fmtSM(r.med) + ' m³/m³<span class="aldm-range">range ' + fmtSM(r.p10) + '–' + fmtSM(r.p90) + ' (P10–P90)</span>' : '—';
     $('#aldm-d-thresh').textContent = r ? fmtSM(r.thr) + ' m³/m³' : '—';
@@ -551,11 +599,17 @@
     $('#aldm-d-skill').textContent = (sk === null || sk === undefined) ? 'not available' : sk.toFixed(2);
     $('#aldm-d-skillnote').textContent = (sk === null || sk === undefined) ? '' :
       (sk > 0 ? 'beats climatology' : 'no better than climatology — treat with caution');
+    const acc = r ? r.acc : null, sg = r ? r.single : null;
+    $('#aldm-d-acc').textContent = has(acc) ? acc.toFixed(2) + ' (about 280 cases)' : 'not available';
+    $('#aldm-d-single').textContent = has(sg) ? sg.toFixed(2) + ' (20 cases, ±0.2)' : 'not available';
+    $('#aldm-d-singlenote').textContent = (has(acc) && has(sg) && acc - sg >= 0.15)
+      ? 'lower than the season average: forecasts at this time of year have done worse here'
+      : (has(acc) && has(sg) && sg - acc >= 0.15) ? 'higher than the season average (may be chance: only 20 cases)' : '';
 
     const ranked = GEO.counties.filter(function(x) { const q = val(x.fips, idx); return q !== null && q !== undefined; })
       .sort(function(a, b2) { return val(b2.fips, idx) - val(a.fips, idx); });
     const rank = ranked.findIndex(function(x) { return x.fips === c.fips; }) + 1;
-    $('#aldm-d-rank').textContent = rank ? rank + ' of ' + ranked.length + (view === 'skill' ? ' (1 = most skilful)' : ' (1 = driest outlook)') : '—';
+    $('#aldm-d-rank').textContent = rank ? rank + ' of ' + ranked.length + (view === 'outlook' ? ' (1 = driest outlook)' : ' (1 = most skilful)') : '—';
   }
 
   function buildSlider() {
